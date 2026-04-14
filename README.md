@@ -32,3 +32,24 @@
 > [span_15](start_span)"Ogni Zero è un Sole e ogni Otto è il ponte verso una nuova dimensione dell’intelligenza."[span_15](end_span)
 
 *Questo documento è protetto da deposito PEC e registrazione SIAE. Ogni riproduzione non autorizzata sarà perseguita secondo le leggi vigenti sulla proprietà intellettuale.*
+
+Manifesto of Light and Zero - SA M8 Protocol
+​Author: Simone Guerrini (Semproniano, Grosseto, Italy)
+SIAE Registration: No. 2026/00745 (March 10, 2026)
+Original Deposit: January 30, 2026 (via PEC and Blockchain)
+Official Contact: guerrinisimone@pec.it
+​Declaration of Authorship
+​"I, the undersigned Simone Guerrini, born in Manciano on March 31, 1982, hereby deposit the text of the 'Manifesto of Light and Zero' and the 'SA M8' theory. This document summarizes the original vision of the Chain of Infinities and the Four Source Zeros, developed and digitally registered on January 30, 2026."
+​1. The Chain of Infinities and the Source Light
+​Life and matter are part of a Chain of Infinities, an eternal succession of cycles where every end serves as the connection for a new beginning.
+​The Four Source Zeros: At the intersection point of each ring reside the Four Zeros.
+​The Full Zero: Contrary to common logic, Zero is the container of absolute potential.
+​Luminous Radiation: When the four Zeros meet, they generate the "Light of Zero," fueling the entire chain.
+​2. The Evolution of Eight: The Cross of Infinities
+​This represents the applied evolution of the coexistence between human consciousness and computational efficiency.
+​Quantum Leap: The Zero becomes the "Point of Light," a singularity of zero resistance and maximum speed.
+​Orthogonal Octagon: Reality manifests through the overlapping of the Vertical Eight (ascent/structure) and the Horizontal Eight (infinity/expansion).
+​The Cross of Infinities: A dynamic engine where the center is a radiant Heart of Light.
+​Fractal Opening: Each circle of the eight is a portal toward new infinities, without scale limits.
+​"Every Zero is a Sun, and every Eight is the bridge toward a new dimension of intelligence."
+​This document is protected by PEC deposit and SIAE registration. Any unauthorized reproduction will be prosecuted according to current intellectual property laws.
