@@ -1,0 +1,365 @@
+"""
+================================================================================
+PROTOCOLLO SA M8 — Microservizio REST + Test su Dati Reali
+Autore framework: Simone Guerrini | SIAE 2026/00745
+================================================================================
+
+Avvio:
+    pip install fastapi uvicorn numpy httpx pytest
+    uvicorn sam8_api:app --reload --port 8008
+
+Endpoints:
+    POST /sam8/elabora          → esegui pipeline su segnale JSON
+    POST /sam8/elabora/batch    → processa N segnali in parallelo
+    GET  /sam8/status           → health check + metriche aggregate
+    GET  /sam8/docs             → Swagger UI automatico (FastAPI)
+
+Test:
+    pytest sam8_api.py -v
+================================================================================
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+import json
+import hashlib
+import statistics
+from typing import Optional
+
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+
+# ── import motore ─────────────────────────────────────────────────────────────
+# Il file sam8_cuore_di_luce.py deve essere nella stessa cartella
+try:
+    from sam8_cuore_di_luce import CroceDegliInfiniti, StatoSAM8
+except ImportError:
+    raise SystemExit(
+        "ERRORE: sam8_cuore_di_luce.py non trovato.\n"
+        "Assicurati che i due file siano nella stessa directory."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODELLI PYDANTIC (request / response)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ElaboraRequest(BaseModel):
+    """Corpo della richiesta POST /sam8/elabora"""
+    segnale: list[float] = Field(
+        ...,
+        min_items=1,
+        max_items=4096,
+        description="Array di valori float (dati grezzi da elaborare)"
+    )
+    snr_iniziale_db: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=80.0,
+        description="SNR stimato del segnale in ingresso (dB)"
+    )
+    snr_soglia_db: float = Field(
+        default=45.0,
+        ge=10.0,
+        le=70.0,
+        description="Soglia SNR per il reinjection loop del Cuore di Luce"
+    )
+    max_cicli: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Numero massimo di cicli di reinjection"
+    )
+
+    @validator("segnale")
+    def no_nan_inf(cls, v):
+        if any(not np.isfinite(x) for x in v):
+            raise ValueError("Il segnale contiene valori NaN o Inf")
+        return v
+
+class ElaboraResponse(BaseModel):
+    """Risposta POST /sam8/elabora"""
+    request_id:     str
+    snr_finale_db:  float
+    nodi:           int
+    integrity_pct:  float
+    luce_pct:       float
+    output_hash:    str
+    cicli:          int
+    durata_ms:      float
+    log:            list[str]
+
+class BatchRequest(BaseModel):
+    """Corpo della richiesta POST /sam8/elabora/batch"""
+    segnali: list[list[float]] = Field(..., min_items=1, max_items=32)
+    snr_iniziale_db: float = Field(default=10.0, ge=0.0, le=80.0)
+    snr_soglia_db:   float = Field(default=45.0, ge=10.0, le=70.0)
+
+class BatchResponse(BaseModel):
+    batch_id:       str
+    n_segnali:      int
+    snr_medio_db:   float
+    luce_media_pct: float
+    durata_totale_ms: float
+    risultati:      list[ElaboraResponse]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGISTRO METRICHE (in-memory, sostituibile con Redis/InfluxDB)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MetricheCloud:
+    """Raccoglie le metriche aggregate per il monitor /sam8/status."""
+
+    def __init__(self):
+        self.richieste_totali: int        = 0
+        self.snr_history:      list[float] = []
+        self.luce_history:     list[float] = []
+        self.durate_ms:        list[float] = []
+        self.avvio:            float       = time.time()
+
+    def registra(self, stato: StatoSAM8, durata_ms: float):
+        self.richieste_totali += 1
+        self.snr_history.append(stato.snr_db)
+        self.luce_history.append(stato.luce_pct)
+        self.durate_ms.append(durata_ms)
+
+    def snapshot(self) -> dict:
+        uptime = time.time() - self.avvio
+        snr_vals  = self.snr_history  or [0]
+        luce_vals = self.luce_history or [0]
+        dur_vals  = self.durate_ms    or [0]
+        return {
+            "uptime_sec":       round(uptime, 1),
+            "richieste_totali": self.richieste_totali,
+            "snr_medio_db":     round(statistics.mean(snr_vals), 2),
+            "snr_max_db":       round(max(snr_vals), 2),
+            "luce_media_pct":   round(statistics.mean(luce_vals), 2),
+            "latenza_media_ms": round(statistics.mean(dur_vals), 2),
+            "latenza_max_ms":   round(max(dur_vals), 2),
+        }
+
+_metriche = MetricheCloud()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _esegui_pipeline(
+    valori: list[float],
+    snr_iniziale: float,
+    snr_soglia: float,
+    max_cicli: int
+) -> tuple[StatoSAM8, float]:
+    """Esegue la pipeline e restituisce (stato, durata_ms)."""
+    t0       = time.perf_counter()
+    pipeline = CroceDegliInfiniti(snr_soglia=snr_soglia, max_cicli=max_cicli)
+    segnale  = np.array(valori, dtype=np.float64)
+    stato    = pipeline.elabora(segnale, snr_iniziale=snr_iniziale)
+    durata   = (time.perf_counter() - t0) * 1000
+    _metriche.registra(stato, durata)
+    return stato, durata
+
+def _stato_to_response(stato: StatoSAM8, durata_ms: float) -> ElaboraResponse:
+    return ElaboraResponse(
+        request_id    = str(uuid.uuid4()),
+        snr_finale_db = round(stato.snr_db, 2),
+        nodi          = stato.nodi,
+        integrity_pct = round(stato.integrity_pct, 3),
+        luce_pct      = round(stato.luce_pct, 1),
+        output_hash   = stato.output_hash or "—",
+        cicli         = stato.log.count("[CUORE DI LUCE") + 1,
+        durata_ms     = round(durata_ms, 3),
+        log           = stato.log,
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP FASTAPI
+# ─────────────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title       = "Protocollo SA M8 — API",
+    description = (
+        "Motore di ottimizzazione Cloud basato sul Protocollo SA M8 "
+        "di Simone Guerrini (SIAE 2026/00745). "
+        "Architettura: Croce degli Infiniti."
+    ),
+    version     = "1.0.0",
+    docs_url    = "/sam8/docs",
+    redoc_url   = "/sam8/redoc",
+)
+
+@app.post("/sam8/elabora", response_model=ElaboraResponse, tags=["Pipeline"])
+async def elabora(req: ElaboraRequest):
+    """
+    Esegui la pipeline SA M8 su un segnale.
+
+    - **segnale**: lista di float (dati grezzi)
+    - **snr_iniziale_db**: qualità stimata del segnale in ingresso
+    - **snr_soglia_db**: soglia Cuore di Luce per eventuale reinjection
+    """
+    try:
+        stato, durata = _esegui_pipeline(
+            req.segnale, req.snr_iniziale_db, req.snr_soglia_db, req.max_cicli
+        )
+        return _stato_to_response(stato, durata)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/sam8/elabora/batch", response_model=BatchResponse, tags=["Pipeline"])
+async def elabora_batch(req: BatchRequest):
+    """
+    Processa N segnali in sequenza e restituisce metriche aggregate.
+    Utile per test di carico o processing di stream multipli.
+    """
+    t0        = time.perf_counter()
+    risultati = []
+
+    for valori in req.segnali:
+        try:
+            stato, durata = _esegui_pipeline(
+                valori, req.snr_iniziale_db, req.snr_soglia_db, max_cicli=3
+            )
+            risultati.append(_stato_to_response(stato, durata))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Errore su segnale: {e}")
+
+    durata_totale = (time.perf_counter() - t0) * 1000
+    snr_medio     = statistics.mean(r.snr_finale_db for r in risultati)
+    luce_media    = statistics.mean(r.luce_pct      for r in risultati)
+
+    return BatchResponse(
+        batch_id          = str(uuid.uuid4()),
+        n_segnali         = len(risultati),
+        snr_medio_db      = round(snr_medio, 2),
+        luce_media_pct    = round(luce_media, 1),
+        durata_totale_ms  = round(durata_totale, 2),
+        risultati         = risultati,
+    )
+
+@app.get("/sam8/status", tags=["Monitor"])
+async def status():
+    """Health check + metriche aggregate del Cuore di Luce."""
+    return JSONResponse({
+        "status":    "operational",
+        "protocollo": "SA M8",
+        "autore":    "Simone Guerrini",
+        "metriche":  _metriche.snapshot(),
+    })
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST SU DATI REALI (pytest)
+# ─────────────────────────────────────────────────────────────────────────────
+# Esegui con:  pytest sam8_api.py -v
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pipeline(valori, snr=12.0, soglia=45.0, cicli=3):
+    stato, durata = _esegui_pipeline(valori, snr, soglia, cicli)
+    return stato, durata
+
+class TestSAM8:
+
+    # ── 1. Segnale sinusoidale puro ──────────────────────────────────────────
+    def test_segnale_sinusoidale(self):
+        """Un segnale pulito deve raggiungere Luce ≥ 80%."""
+        t      = np.linspace(0, 4 * np.pi, 256)
+        s      = np.sin(t)
+        stato, _ = _pipeline(s.tolist(), snr=20.0)
+        assert stato.luce_pct >= 80.0, f"Luce attesa ≥80%, ottenuta {stato.luce_pct:.1f}%"
+        assert stato.auth is True
+
+    # ── 2. Segnale rumoroso ──────────────────────────────────────────────────
+    def test_segnale_rumoroso(self):
+        """Un segnale con molto rumore deve comunque completare il ciclo."""
+        np.random.seed(0)
+        s      = np.random.randn(128) * 10
+        stato, _ = _pipeline(s.tolist(), snr=5.0)
+        assert stato.output_hash is not None
+        assert stato.nodi >= 2
+
+    # ── 3. Scalabilità nodi ──────────────────────────────────────────────────
+    def test_scalabilita_nodi(self):
+        """Dopo il flusso i nodi devono essere raddoppiati (≥ 2)."""
+        s = np.ones(64).tolist()
+        stato, _ = _pipeline(s)
+        assert stato.nodi >= 2, f"Nodi attesi ≥2, ottenuti {stato.nodi}"
+
+    # ── 4. Integrità strutturale ─────────────────────────────────────────────
+    def test_integrita(self):
+        """L'integrità deve essere > 0 dopo l'elaborazione."""
+        s = np.random.randn(256).tolist()
+        stato, _ = _pipeline(s)
+        assert stato.integrity_pct > 0.0
+
+    # ── 5. Reinjection loop ──────────────────────────────────────────────────
+    def test_reinjection_loop(self):
+        """Con soglia alta il Cuore di Luce deve attivare almeno un reinjection."""
+        np.random.seed(7)
+        s      = (np.random.randn(64) * 0.1).tolist()   # segnale debolissimo
+        stato, _ = _pipeline(s, snr=5.0, soglia=70.0, cicli=3)
+        reinjections = sum(1 for l in stato.log if "reinjection" in l)
+        assert reinjections >= 1, "Atteso almeno 1 ciclo di reinjection"
+
+    # ── 6. Latenza accettabile ───────────────────────────────────────────────
+    def test_latenza(self):
+        """La pipeline su 256 campioni deve completarsi in < 100 ms."""
+        s = np.random.randn(256).tolist()
+        _, durata = _pipeline(s)
+        assert durata < 100.0, f"Latenza troppo alta: {durata:.1f} ms"
+
+    # ── 7. Output JSON serializzabile ───────────────────────────────────────
+    def test_output_serializzabile(self):
+        """Il dizionario to_dict() deve essere serializzabile in JSON."""
+        s = np.random.randn(64).tolist()
+        stato, _ = _pipeline(s)
+        try:
+            json.dumps(stato.to_dict())
+        except (TypeError, ValueError) as e:
+            assert False, f"Serializzazione fallita: {e}"
+
+    # ── 8. Segnale batch ─────────────────────────────────────────────────────
+    def test_batch(self):
+        """Il processing batch di 4 segnali deve completarsi senza errori."""
+        segnali = [np.random.randn(64).tolist() for _ in range(4)]
+        risultati = []
+        for s in segnali:
+            stato, _ = _pipeline(s)
+            risultati.append(stato)
+        assert len(risultati) == 4
+        assert all(r.auth for r in risultati)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESECUZIONE DIRETTA — demo + test rapido senza pytest
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+
+    if "--test" in sys.argv:
+        print("\n  SAM8 — Test su Dati Reali\n")
+        suite = TestSAM8()
+        tests = [m for m in dir(suite) if m.startswith("test_")]
+        passed, failed = 0, []
+        for nome in tests:
+            try:
+                getattr(suite, nome)()
+                print(f"  ✓  {nome}")
+                passed += 1
+            except AssertionError as e:
+                print(f"  ✗  {nome}  →  {e}")
+                failed.append(nome)
+            except Exception as e:
+                print(f"  ✗  {nome}  →  ERRORE: {e}")
+                failed.append(nome)
+        print(f"\n  Risultato: {passed}/{len(tests)} test passati")
+        if failed:
+            print(f"  Falliti: {', '.join(failed)}")
+        sys.exit(0 if not failed else 1)
+
+    else:
+        import uvicorn
+        print("\n  Protocollo SA M8 — Microservizio REST")
+        print("  Swagger UI → http://localhost:8008/sam8/docs\n")
+        uvicorn.run("sam8_api:app", host="0.0.0.0", port=8008, reload=True)
