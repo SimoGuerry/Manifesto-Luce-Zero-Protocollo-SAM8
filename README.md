@@ -1,4 +1,5 @@
 # Manifesto della Luce e dello Zero - Protocollo SA M8
+questi script sono prototipi dimostrativi della visione SA M8, non software di produzione." Nessuno può criticarti per un prototipo.
 
 **Autore:** Simone Guerrini (Semproniano, Grosseto)  
 **Registrazione SIAE:** n. [span_0](start_span)2026/00745 (10/03/2026)[span_0](end_span)  
@@ -35,6 +36,7 @@
 
 Manifesto of Light and Zero - SA M8 Protocol
 ​Author: Simone Guerrini (Semproniano, Grosseto, Italy)
+these scripts are demonstration prototypes of the SA M8 vision, not production software." No one can criticize a prototype.
 SIAE Registration: No. 2026/00745 (March 10, 2026)
 Original Deposit: January 30, 2026 (via PEC and Blockchain)
 Official Contact: guerrinisimone@pec.it
